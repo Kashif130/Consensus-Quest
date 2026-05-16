@@ -272,7 +272,7 @@ input::placeholder{color:var(--muted);}
 
 <div class="xp-flash" id="xpFlash">
   <div class="xp-num" id="xpNum">+150</div>
-  <div class="xp-lbl">XP Saved On-Chain!</div>
+  <div class="xp-lbl">XP Saved On-Chain! 🎉</div>
 </div>
 
 <script type="module">
@@ -499,15 +499,15 @@ function simulateContract(method, args) {
 // ── LOBBY ACTIONS ──────────────────────────────────────────────────────────
 async function registerPlayer() {
   const username = document.getElementById('username').value.trim();
-  if (!username) { alert('Username daalen pehle.'); return; }
+  if (!username) { alert('Please enter a username first.'); return; }
   const btn = document.querySelector('#screen-lobby .card:nth-child(2) .btn');
   if (btn) btn.disabled = true;
-  showTx('txStatus', '⛓ Username on-chain save ho raha hai...');
+  showTx('txStatus', '⛓ Saving username on-chain...');
   const result = await writeContract('register', [username], 'txStatus');
   if (btn) btn.disabled = false;
   if (result) {
     gameState.username = username;
-    showTx('txStatus', `✅ Username "${username}" chain pe save ho gaya!`);
+    showTx('txStatus', `✅ Username "${username}" saved on-chain!`);
     setTimeout(() => hideTx('txStatus'), 3000);
   }
 }
@@ -527,22 +527,22 @@ async function createRoom() {
   if (btn) btn.disabled = true;
 
   // Step 1: Transaction submit
-  showTx('txStatus', '📤 Transaction submit ho rahi hai...');
+  showTx('txStatus', '📤 Submitting transaction...');
   await new Promise(r => setTimeout(r, 500));
 
   // Step 2: Pending
-  showTx('txStatus', '⏳ Room abhi create nahi hui — Transaction PENDING hai...');
+  showTx('txStatus', '⏳ Room not created yet — Transaction is PENDING...');
 
   const result = await writeContract('create_room', [rid, gameState.mode], 'txStatus');
 
   if (!result) {
-    showTx('txStatus', '❌ Room create nahi hua. Wallet aur contract check karen.');
+    showTx('txStatus', '❌ Room creation failed. Please check your wallet and contract.');
     if (btn) btn.disabled = false;
     return;
   }
 
   // Step 3: TX done, now verify room is readable on chain
-  showTx('txStatus', '✅ Transaction FINALIZED! Room chain pe verify ho rahi hai...');
+  showTx('txStatus', '✅ Transaction FINALIZED! Verifying room on chain...');
 
   let roomReady = false;
   for (let i = 0; i < 8; i++) {
@@ -553,18 +553,18 @@ async function createRoom() {
       break;
     }
     const dots = '.'.repeat((i % 3) + 1);
-    showTx('txStatus', `⛓ Room chain pe sync ho rahi hai${dots} (${i+1}/8)`);
+    showTx('txStatus', `⛓ Room syncing on chain${dots} (${i+1}/8)`);
   }
 
   if (btn) btn.disabled = false;
 
   if (!roomReady) {
-    showTx('txStatus', '⚠️ Room create hua lekin abhi visible nahi — thodi der baad refresh karo.');
+    showTx('txStatus', '⚠️ Room created but not visible yet — please refresh in a moment.');
     return;
   }
 
   // Auto-enter room
-  showTx('txStatus', '🎮 Room ready! Andar ja rahe hain...');
+  showTx('txStatus', '🎮 Room ready! Entering now...');
   await new Promise(r => setTimeout(r, 800));
   hideTx('txStatus');
   gameState.roomId = rid;
@@ -574,28 +574,28 @@ async function createRoom() {
 
 async function joinRoom() {
   const rid = document.getElementById('joinRoomId').value.trim();
-  if (!rid) { alert('Room ID daalen.'); return; }
+  if (!rid) { alert('Please enter a Room ID.'); return; }
 
   // Verify room exists on chain before joining (consensus may take time)
-  showTx('txStatus', `🔍 Room "${rid}" chain pe check ho rahi hai...`);
+  showTx('txStatus', `🔍 Checking if room "${rid}" exists on chain...`);
   let roomExists = false;
   for (let i = 0; i < 5; i++) {
     const check = await readContract('get_room', [rid]);
     if (check && !check.error) { roomExists = true; break; }
     if (i < 4) {
-      showTx('txStatus', `⏳ Room sync ho rahi hai chain pe... (${i+1}/5 — 4s wait)`);
+      showTx('txStatus', `⏳ Room syncing on chain... (${i+1}/5)`);
       await new Promise(r => setTimeout(r, 4000));
     }
   }
   if (!roomExists) {
-    showTx('txStatus', '❌ Room chain pe nahi mili. Room ID sahi hai? Host ka create_room FINALIZED hua?');
+    showTx('txStatus', '❌ Room not found on chain. Is the Room ID correct? Has the host\'s room been finalized?');
     return;
   }
 
-  showTx('txStatus', `⛓ Room "${rid}" join ho raha hai...`);
+  showTx('txStatus', `⛓ Joining room "${rid}"...`);
   const result = await writeContract('join_room', [rid], 'txStatus');
   hideTx('txStatus');
-  if (!result) { showTx('txStatus', '❌ Join nahi hua. Dobara try karo.'); return; }
+  if (!result) { showTx('txStatus', '❌ Join failed. Please try again.'); return; }
   gameState.roomId = rid;
   gameState.isHost = false;
   enterRoom(rid);
@@ -610,15 +610,15 @@ function enterRoom(rid) {
 async function refreshRoom() {
   const room = await readContract('get_room', [gameState.roomId]);
   if (!room || room.error) {
-    document.getElementById('roomPlayers').innerHTML = `<div style="color:var(--muted);font-size:12px">⚠️ ${room?.error || 'Room load nahi hui'}</div>`;
+    document.getElementById('roomPlayers').innerHTML = `<div style="color:var(--muted);font-size:12px">⚠️ ${room?.error || 'Failed to load room'}</div>`;
     return;
   }
 
   const statusEl = document.getElementById('roomStatusBadge');
   if (room.is_full) {
-    statusEl.innerHTML = `<span class="room-status ready">✅ Dono players aa gaye — shuru karo!</span>`;
+    statusEl.innerHTML = `<span class="room-status ready">✅ Both players joined — ready to start!</span>`;
   } else {
-    statusEl.innerHTML = `<span class="room-status waiting">⏳ Doosre player ka wait — Room ID share karo: <strong>${gameState.roomId}</strong></span>`;
+    statusEl.innerHTML = `<span class="room-status waiting">⏳ Waiting for 2nd player — share Room ID: <strong>${gameState.roomId}</strong></span>`;
   }
 
   const players = [];
@@ -628,7 +628,7 @@ async function refreshRoom() {
   document.getElementById('roomPlayers').innerHTML = players.map(p => `
     <div class="lb-row">
       <div class="lb-name">${p.role}: ${p.waiting ? '⏳ Waiting...' : p.addr.slice(0,14)+'...'}</div>
-      <div class="lb-xp">${p.waiting ? '' : p.answered ? '✅ Jawab diya' : '🎮 Ready'}</div>
+      <div class="lb-xp">${p.waiting ? '' : p.answered ? '✅ Answered' : '🎮 Ready'}</div>
     </div>`).join('');
 
   if (room.question) {
@@ -637,7 +637,7 @@ async function refreshRoom() {
 
   const btn = document.getElementById('startRoundBtn');
   btn.disabled = !room.is_full;
-  btn.textContent = room.is_full ? `▶ Round ${gameState.round+1} Shuru Karo` : '⏳ Player ka wait...';
+  btn.textContent = room.is_full ? `▶ Start Round ${gameState.round+1}` : '⏳ Waiting for player...';
 }
 
 // ── GAME ────────────────────────────────────────────────────────────────────
@@ -645,15 +645,15 @@ async function startRound() {
   if (gameState.round >= gameState.totalRounds) { endGame(); return; }
 
   if (!gameState.currentQ) {
-    showTx('txGame', '⛓ Question chain se load ho rahi hai...');
+    showTx('txGame', '⛓ Loading question from chain...');
     const room = await readContract('get_room', [gameState.roomId]);
     hideTx('txGame');
-    if (!room || !room.question) { showTx('txGame', '❌ Question load nahi hua.'); return; }
+    if (!room || !room.question) { showTx('txGame', '❌ Failed to load question.'); return; }
     gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
   }
 
   const q = gameState.currentQ;
-  gameState.round = q.round_num || gameState.round + 1;
+  gameState.round += 1;  // Always increment — don't rely on chain's round_num
   gameState.answered = false;
   document.getElementById('startRoundBtn').disabled = true;
   showScreen('game');
@@ -661,7 +661,7 @@ async function startRound() {
   document.getElementById('roundLabel').textContent = `Round ${gameState.round}/${gameState.totalRounds}`;
   document.getElementById('qCat').textContent = q.category || 'INTELLIGENT CONTRACTS';
   document.getElementById('qText').textContent = q.question;
-  document.getElementById('qSub').textContent = '⛓ AI ne GenLayer pe generate kiya · Validators ne consensus diya';
+  document.getElementById('qSub').textContent = '⛓ AI generated on GenLayer · Validators reached consensus';
   document.getElementById('liveXP').textContent = gameState.myScore + ' XP';
   document.getElementById('consensusWrap').style.display = 'none';
 
@@ -775,8 +775,8 @@ async function endGame() {
   const myRank = sorted.findIndex(p => p.address?.toLowerCase()===walletAddress?.toLowerCase()) + 1;
 
   document.getElementById('resEmoji').textContent = myRank===1?'🏆':myRank===2?'🥈':'⚡';
-  document.getElementById('resTitle').textContent = myRank===1?'Jeet Gaye!':myRank>0?`Rank #${myRank}`:'Game Over!';
-  document.getElementById('resSub').textContent = `XP GenLayer pe save · ${gameState.round} rounds`;
+  document.getElementById('resTitle').textContent = myRank===1?'You Won!':myRank>0?`Rank #${myRank}`:'Game Over!';
+  document.getElementById('resSub').textContent = `XP saved on GenLayer · ${gameState.round} rounds played`;
 
   const medals = ['🥇','🥈','🥉'];
   document.getElementById('finalLb').innerHTML = sorted.slice(0,5).map((p,i) => `
@@ -794,7 +794,7 @@ async function loadLeaderboard() {
   const data = await readContract('get_leaderboard', []);
   const list = document.getElementById('leaderboardList');
   if (!data || !Array.isArray(data) || !data.length) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Abhi koi entry nahi — pehle aap khelo!</div>';
+    list.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">No entries yet — be the first to play!</div>';
     return;
   }
   const medals = ['🥇','🥈','🥉'];
@@ -819,7 +819,7 @@ function showXP(xp) {
   el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),1800);
 }
 function shareResult() {
-  const text=`⚡ Maine ${gameState.myScore} XP kamaye Consensus Quest mein — GenLayer ka fully on-chain game!\n\nPlay: https://kashif130.github.io/Consensus-Quest/`;
+  const text=`⚡ I scored ${gameState.myScore} XP in Consensus Quest — a fully on-chain game on GenLayer!\n\nPlay: https://kashif130.github.io/Consensus-Quest/`;
   navigator.share?.({title:'Consensus Quest',text})||navigator.clipboard.writeText(text).then(()=>alert('Copied!'));
 }
 
