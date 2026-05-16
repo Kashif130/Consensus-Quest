@@ -346,33 +346,86 @@ function initLobby() {
 }
 
 // ── CONTRACT CALLS ─────────────────────────────────────────────────────────
+
+// Parse result from GenLayer — handles string JSON, plain objects, primitives
+function parseResult(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return raw; }
+  }
+  return raw;
+}
+
+// Poll transaction until FINALIZED — GenLayer write txs are async
+async function waitForTx(txHash, maxWaitMs = 90000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const res = await fetch(CONFIG.RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'gen_getTransactionByHash',
+          params: [txHash]
+        })
+      });
+      const data = await res.json();
+      const tx = data.result;
+      if (!tx) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      const s = (tx.status || '').toUpperCase();
+      console.log('[TX poll]', txHash.slice(0,10), s);
+      if (s === 'FINALIZED') return { ok: true };
+      if (s === 'CANCELED' || s === 'FAILED') return { ok: false, error: 'TX ' + s };
+    } catch (e) { console.warn('Poll error:', e); }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return { ok: false, error: 'TX timed out after 90s' };
+}
+
 async function callContract(method, params, write = false) {
   if (CONFIG.DEMO_MODE) return simulateContract(method, params);
   try {
-    const body = {
-      jsonrpc: "2.0", id: 1,
-      method: write ? "gen_sendTransaction" : "gen_call",
-      params: [{
-        to: CONFIG.CONTRACT_ADDRESS,
-        from: wallet.address,
-        data: { method, params }
-      }]
-    };
-    const res = await fetch(CONFIG.RPC_URL, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (data.error) { console.error('RPC error:', data.error); return null; }
-    // GenLayer returns result as JSON string — parse if needed
-    const raw = data.result;
-    if (typeof raw === 'string') {
-      try { return JSON.parse(raw); } catch { return raw; }
+    if (write) {
+      // Send write transaction
+      const sendRes = await fetch(CONFIG.RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'gen_sendTransaction',
+          params: [{ to: CONFIG.CONTRACT_ADDRESS, from: wallet.address, data: { method, params } }]
+        })
+      });
+      const sendData = await sendRes.json();
+      if (sendData.error) {
+        console.error('Send TX error:', sendData.error);
+        return null;
+      }
+      const txHash = sendData.result;
+      console.log('[TX sent]', method, txHash);
+      // Wait for chain confirmation before returning
+      const receipt = await waitForTx(txHash);
+      if (!receipt.ok) { console.error('TX failed:', receipt.error); return null; }
+      return { ok: true };
+
+    } else {
+      // Read (view) call — immediate
+      const res = await fetch(CONFIG.RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'gen_call',
+          params: [{ to: CONFIG.CONTRACT_ADDRESS, from: wallet.address, data: { method, params } }]
+        })
+      });
+      const data = await res.json();
+      if (data.error) { console.error('gen_call error:', data.error); return null; }
+      return parseResult(data.result);
     }
-    return raw;
   } catch (e) {
-    console.error('Contract call failed:', e);
+    console.error('callContract exception:', e);
     return null;
   }
 }
@@ -506,11 +559,20 @@ function getDemoLeaderboard() {
 // ── LOBBY ACTIONS ──────────────────────────────────────────────────────────
 async function registerPlayer() {
   const username = document.getElementById('username').value.trim();
-  if (!username) return;
-  showTx('txStatus', 'Registering on-chain...');
-  // FIX: was 'register_player' — correct contract method is 'register'
-  await callContract('register', [username], true);
+  if (!username) { alert('Please enter a username first.'); return; }
+  const btn = event.target;
+  btn.disabled = true;
+  showTx('txStatus', '⛓ Registering username on-chain... (waiting for confirmation)');
+  const result = await callContract('register', [username], true);
   hideTx('txStatus');
+  btn.disabled = false;
+  if (result && result.ok) {
+    gameState.username = username;
+    showTx('txStatus', '✅ Username "' + username + '" saved on-chain!');
+    setTimeout(() => hideTx('txStatus'), 3000);
+  } else {
+    showTx('txStatus', '❌ Registration failed. Check your wallet and RPC connection.');
+  }
   document.getElementById('playerXP').textContent = gameState.myScore + ' XP';
 }
 
@@ -522,14 +584,15 @@ function selMode(el, mode) {
 
 async function createRoom() {
   const roomId = document.getElementById('roomId').value.trim() || 'room-' + Date.now();
-  document.getElementById('roomId').value = roomId; // show the generated id
-  showTx('txStatus', `⛓ Creating room & generating AI question on-chain...`);
-  // FIX: create_room now takes [roomId, mode] only — no extra params
-  // The contract generates the question inside create_room automatically
+  document.getElementById('roomId').value = roomId;
+  const btn = event.target;
+  btn.disabled = true;
+  showTx('txStatus', '⛓ Creating room on-chain & generating AI question (this takes ~30s)...');
   const result = await callContract('create_room', [roomId, gameState.mode], true);
   hideTx('txStatus');
-  if (!result && !CONFIG.DEMO_MODE) {
-    showTx('txStatus', '❌ Failed to create room. Check contract address and RPC.');
+  btn.disabled = false;
+  if (!result) {
+    showTx('txStatus', '❌ Failed to create room. Check wallet connection and contract address.');
     return;
   }
   gameState.roomId = roomId;
@@ -539,12 +602,18 @@ async function createRoom() {
 
 async function joinRoom() {
   const roomId = document.getElementById('joinRoomId').value.trim();
-  if (!roomId) return;
-  showTx('txStatus', `Joining room "${roomId}"...`);
-  // FIX: join_room takes [roomId] only
+  if (!roomId) { alert('Please enter a Room ID.'); return; }
+  const btn = event.target;
+  btn.disabled = true;
+  showTx('txStatus', `⛓ Joining room "${roomId}" on-chain (waiting for confirmation)...`);
   const result = await callContract('join_room', [roomId], true);
   hideTx('txStatus');
-  if (result && result.error) {
+  btn.disabled = false;
+  if (!result) {
+    showTx('txStatus', '❌ Failed to join room. Make sure the Room ID is correct and room exists on-chain.');
+    return;
+  }
+  if (result.error) {
     showTx('txStatus', '❌ ' + result.error);
     return;
   }
