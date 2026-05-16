@@ -533,10 +533,27 @@ async function createRoom() {
 async function joinRoom() {
   const rid = document.getElementById('joinRoomId').value.trim();
   if (!rid) { alert('Room ID daalen.'); return; }
+
+  // Verify room exists on chain before joining (consensus may take time)
+  showTx('txStatus', `🔍 Room "${rid}" chain pe check ho rahi hai...`);
+  let roomExists = false;
+  for (let i = 0; i < 5; i++) {
+    const check = await readContract('get_room', [rid]);
+    if (check && !check.error) { roomExists = true; break; }
+    if (i < 4) {
+      showTx('txStatus', `⏳ Room sync ho rahi hai chain pe... (${i+1}/5 — 4s wait)`);
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  }
+  if (!roomExists) {
+    showTx('txStatus', '❌ Room chain pe nahi mili. Room ID sahi hai? Host ka create_room FINALIZED hua?');
+    return;
+  }
+
   showTx('txStatus', `⛓ Room "${rid}" join ho raha hai...`);
   const result = await writeContract('join_room', [rid], 'txStatus');
   hideTx('txStatus');
-  if (!result) { showTx('txStatus', '❌ Join nahi hua. Room ID sahi hai? Room chain pe exist karti hai?'); return; }
+  if (!result) { showTx('txStatus', '❌ Join nahi hua. Dobara try karo.'); return; }
   gameState.roomId = rid;
   gameState.isHost = false;
   enterRoom(rid);
