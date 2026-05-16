@@ -702,23 +702,30 @@ async function submitAnswer(idx) {
   document.querySelectorAll('.opt').forEach(b => b.disabled = true);
   if (idx !== null) document.getElementById(`opt${idx}`)?.classList.add('selected');
 
+  showTx('txGame', '⛓ Submitting your answer on-chain...');
+
   // Submit on-chain
   await writeContract('submit_room_answer', [gameState.roomId, idx ?? -1], 'txGame');
 
-  // Read result
-  const res = await readContract('check_room_answer', [gameState.roomId, idx ?? -1]);
+  // Read result — retry a few times if needed
+  showTx('txGame', '🔍 Verifying answer from chain...');
+  let res = null;
+  for (let i = 0; i < 4; i++) {
+    res = await readContract('check_room_answer', [gameState.roomId, idx ?? -1]);
+    if (res && !res.error) break;
+    await new Promise(r => setTimeout(r, 2000));
+  }
   hideTx('txGame');
 
-  if (!res || res.error) { showTx('txGame', '❌ Jawab verify nahi hua: ' + (res?.error||'unknown')); return; }
-
-  const correctIdx = res.correct_index;
-  const isCorrect = res.is_correct;
-  const xp = res.xp_earned || 0;
+  // Even if verify fails, still proceed — show result based on local guess
+  let correctIdx = res?.correct_index ?? null;
+  const isCorrect = res?.is_correct ?? false;
+  const xp = res?.xp_earned ?? 0;
 
   document.querySelectorAll('.opt').forEach((btn, i) => {
     btn.classList.remove('selected');
-    if (i === correctIdx) btn.classList.add('correct');
-    else if (i === idx) btn.classList.add('wrong');
+    if (correctIdx !== null && i === correctIdx) btn.classList.add('correct');
+    else if (i === idx) btn.classList.add(isCorrect ? 'correct' : 'wrong');
   });
 
   if (isCorrect) {
@@ -727,19 +734,34 @@ async function submitAnswer(idx) {
     showXP(xp);
   }
 
-  const cPct = res.consensus_percent || Math.floor(Math.random()*30+60);
-  document.getElementById('cPct').textContent = cPct + '%';
-  document.getElementById('cVal').textContent = `"${(res.correct_option||'').substring(0,50)}"`;
-  document.getElementById('consensusWrap').style.display = 'flex';
+  // Show result banner
+  const resultBanner = document.getElementById('txGame');
+  if (res && !res.error) {
+    const cPct = res.consensus_percent || Math.floor(Math.random()*30+60);
+    document.getElementById('cPct').textContent = cPct + '%';
+    document.getElementById('cVal').textContent = `"${(res.correct_option||'').substring(0,50)}"`;
+    document.getElementById('consensusWrap').style.display = 'flex';
+    showTx('txGame', isCorrect
+      ? `✅ Correct! +${xp} XP earned. Moving to next round...`
+      : `❌ Wrong answer. Correct was: "${(res.correct_option||'').substring(0,40)}". Moving on...`
+    );
+  } else {
+    showTx('txGame', idx === null
+      ? '⏰ Time up! Moving to next round...'
+      : '➡️ Answer submitted. Moving to next round...'
+    );
+  }
 
+  // Always proceed after 4 seconds — wrong or right
   setTimeout(() => {
+    hideTx('txGame');
     if (gameState.round >= gameState.totalRounds) {
       endGame();
     } else {
       showScreen('room');
       gameState.currentQ = null;
       document.getElementById('startRoundBtn').disabled = false;
-      document.getElementById('startRoundBtn').textContent = `▶ Round ${gameState.round+1} Shuru Karo`;
+      document.getElementById('startRoundBtn').textContent = `▶ Start Round ${gameState.round + 1}`;
     }
   }, 4000);
 }
