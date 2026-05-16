@@ -521,10 +521,52 @@ function selMode(el, mode) {
 async function createRoom() {
   const rid = document.getElementById('roomId').value.trim() || 'room-' + Date.now();
   document.getElementById('roomId').value = rid;
-  showTx('txStatus', '⛓ Room ban raha hai aur AI question generate ho raha hai (~30s)...');
+
+  // Disable button to prevent double clicks
+  const btn = document.querySelector('#screen-lobby .card:nth-child(3) .btn');
+  if (btn) btn.disabled = true;
+
+  // Step 1: Transaction submit
+  showTx('txStatus', '📤 Transaction submit ho rahi hai...');
+  await new Promise(r => setTimeout(r, 500));
+
+  // Step 2: Pending
+  showTx('txStatus', '⏳ Room abhi create nahi hui — Transaction PENDING hai...');
+
   const result = await writeContract('create_room', [rid, gameState.mode], 'txStatus');
+
+  if (!result) {
+    showTx('txStatus', '❌ Room create nahi hua. Wallet aur contract check karen.');
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  // Step 3: TX done, now verify room is readable on chain
+  showTx('txStatus', '✅ Transaction FINALIZED! Room chain pe verify ho rahi hai...');
+
+  let roomReady = false;
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const check = await readContract('get_room', [rid]);
+    if (check && !check.error) {
+      roomReady = true;
+      break;
+    }
+    const dots = '.'.repeat((i % 3) + 1);
+    showTx('txStatus', `⛓ Room chain pe sync ho rahi hai${dots} (${i+1}/8)`);
+  }
+
+  if (btn) btn.disabled = false;
+
+  if (!roomReady) {
+    showTx('txStatus', '⚠️ Room create hua lekin abhi visible nahi — thodi der baad refresh karo.');
+    return;
+  }
+
+  // Auto-enter room
+  showTx('txStatus', '🎮 Room ready! Andar ja rahe hain...');
+  await new Promise(r => setTimeout(r, 800));
   hideTx('txStatus');
-  if (!result) { showTx('txStatus', '❌ Room create nahi hua. Wallet aur contract check karen.'); return; }
   gameState.roomId = rid;
   gameState.isHost = true;
   enterRoom(rid);
