@@ -397,10 +397,11 @@ async function readContract(functionName, args = []) {
 // ── CONTRACT WRITE ──────────────────────────────────────────────────────────
 async function writeContract(functionName, args = [], statusElId = 'txStatus') {
   if (isDemo) return simulateContract(functionName, args);
+  const el = document.getElementById(statusElId);
   try {
-    showTx(statusElId, `⏳ Sending transaction: ${functionName}...`);
+    showTx(statusElId, `📤 Opening MetaMask for: ${functionName}...`);
+    if (el) { el.style.display = 'block'; el.classList.add('show'); }
 
-    // writeContract triggers MetaMask popup automatically
     const txHash = await writeClient.writeContract({
       address: CONTRACT_ADDRESS,
       functionName,
@@ -409,17 +410,26 @@ async function writeContract(functionName, args = [], statusElId = 'txStatus') {
     });
 
     console.log('[TX sent]', functionName, txHash);
-    showTx(statusElId, `⛓ Waiting for consensus (${functionName})... TX: ${txHash.slice(0,12)}...`);
+    showTx(statusElId, `⛓ TX sent! Waiting for validators & consensus...\nTX: ${txHash.slice(0,14)}...`);
 
-    // Wait for FINALIZED
+    // Animate dots while waiting
+    let dots = 0;
+    const dotTimer = setInterval(() => {
+      dots = (dots + 1) % 4;
+      showTx(statusElId, `⛓ Validators reaching consensus${'.'.repeat(dots)}\nTX: ${txHash.slice(0,14)}...`);
+    }, 2000);
+
     const receipt = await readClient.waitForTransactionReceipt({
       hash: txHash,
       status: TransactionStatus.FINALIZED,
-      retries: 60,
+      retries: 80,
       interval: 3000
     });
 
+    clearInterval(dotTimer);
     console.log('[TX finalized]', functionName, receipt);
+    showTx(statusElId, `✅ Transaction finalized! (${functionName})`);
+    await new Promise(r => setTimeout(r, 800));
     return { ok: true, receipt };
   } catch(e) {
     console.error('writeContract error:', functionName, e);
@@ -753,57 +763,53 @@ async function submitAnswer(idx) {
   document.querySelectorAll('.opt').forEach(b => b.disabled = true);
   if (idx !== null) document.getElementById(`opt${idx}`)?.classList.add('selected');
 
-  showTx('txGame', '⛓ Submitting your answer on-chain...');
+  // Submit on-chain — pass 0 for timeout (no answer)
+  const answerIdx = (idx === null || idx < 0) ? 255 : idx;
+  await writeContract('submit_room_answer', [gameState.roomId, answerIdx], 'txGame');
 
-  // Submit on-chain
-  await writeContract('submit_room_answer', [gameState.roomId, idx ?? -1], 'txGame');
-
-  // Read result — retry a few times if needed
-  showTx('txGame', '🔍 Verifying answer from chain...');
+  // Check answer from chain (view call — no TX needed)
+  showTx('txGame', '🔍 Checking answer...');
   let res = null;
-  for (let i = 0; i < 4; i++) {
-    res = await readContract('check_room_answer', [gameState.roomId, idx ?? -1]);
+  for (let i = 0; i < 5; i++) {
+    res = await readContract('check_room_answer', [gameState.roomId, answerIdx]);
     if (res && !res.error) break;
     await new Promise(r => setTimeout(r, 2000));
   }
   hideTx('txGame');
 
-  // Even if verify fails, still proceed — show result based on local guess
-  let correctIdx = res?.correct_index ?? null;
-  const isCorrect = res?.is_correct ?? false;
-  const xp = res?.xp_earned ?? 0;
+  // Get correct answer
+  const correctIdx = res?.correct_index ?? null;
+  const isCorrect  = res?.is_correct ?? false;
+  const xp         = (isCorrect && res?.xp_earned) ? res.xp_earned : (isCorrect ? 100 : 0);
 
+  // Highlight options
   document.querySelectorAll('.opt').forEach((btn, i) => {
     btn.classList.remove('selected');
     if (correctIdx !== null && i === correctIdx) btn.classList.add('correct');
-    else if (i === idx) btn.classList.add(isCorrect ? 'correct' : 'wrong');
+    else if (i === idx && !isCorrect) btn.classList.add('wrong');
   });
 
+  // Always update local score
   if (isCorrect) {
     gameState.myScore += xp;
     document.getElementById('liveXP').textContent = gameState.myScore + ' XP';
     showXP(xp);
   }
 
-  // Show result banner
-  const resultBanner = document.getElementById('txGame');
+  // Result message
   if (res && !res.error) {
-    const cPct = res.consensus_percent || Math.floor(Math.random()*30+60);
-    document.getElementById('cPct').textContent = cPct + '%';
+    document.getElementById('cPct').textContent = '100%';
     document.getElementById('cVal').textContent = `"${(res.correct_option||'').substring(0,50)}"`;
     document.getElementById('consensusWrap').style.display = 'flex';
     showTx('txGame', isCorrect
-      ? `✅ Correct! +${xp} XP earned. Moving to next round...`
-      : `❌ Wrong answer. Correct was: "${(res.correct_option||'').substring(0,40)}". Moving on...`
+      ? `✅ Correct! +${xp} XP earned. Next round in 4s...`
+      : `❌ Wrong! Correct: "${(res.correct_option||'').substring(0,40)}". Next round in 4s...`
     );
   } else {
-    showTx('txGame', idx === null
-      ? '⏰ Time up! Moving to next round...'
-      : '➡️ Answer submitted. Moving to next round...'
-    );
+    showTx('txGame', idx === null ? '⏰ Time up! Next round in 4s...' : '➡️ Submitted. Next round in 4s...');
   }
 
-  // Always proceed after 4 seconds — wrong or right
+  // Always go to next round after 4s
   setTimeout(() => {
     hideTx('txGame');
     if (gameState.round >= gameState.totalRounds) {
@@ -819,15 +825,34 @@ async function submitAnswer(idx) {
 
 async function endGame() {
   showScreen('results');
-  const myStats = await readContract('get_player_stats', [walletAddress]);
-  const myXP = myStats ? myStats.xp : gameState.myScore;
+
+  // Use local score first, then try chain
+  let myXP = gameState.myScore;
+  try {
+    const myStats = await readContract('get_player_stats', [walletAddress]);
+    // Chain score may lag — use whichever is higher
+    if (myStats && myStats.xp !== undefined) {
+      myXP = Math.max(gameState.myScore, Number(myStats.xp));
+    }
+  } catch(e) { console.warn('Stats fetch failed, using local score'); }
+
   const lbData = await readContract('get_leaderboard', []);
-  const sorted = Array.isArray(lbData) ? lbData : [{ username:'You', address:walletAddress, xp:myXP }];
-  const myRank = sorted.findIndex(p => p.address?.toLowerCase()===walletAddress?.toLowerCase()) + 1;
+  let sorted = Array.isArray(lbData) ? lbData : [];
+
+  // Inject local player if missing or score is stale
+  const myIdx = sorted.findIndex(p => p.address?.toLowerCase() === walletAddress?.toLowerCase());
+  if (myIdx === -1) {
+    sorted.push({ username: gameState.username || walletAddress.slice(0,8), address: walletAddress, xp: myXP, correct: 0, games: gameState.round });
+  } else {
+    sorted[myIdx].xp = Math.max(sorted[myIdx].xp, myXP);
+  }
+  sorted.sort((a,b) => b.xp - a.xp);
+
+  const myRank = sorted.findIndex(p => p.address?.toLowerCase() === walletAddress?.toLowerCase()) + 1;
 
   document.getElementById('resEmoji').textContent = myRank===1?'🏆':myRank===2?'🥈':'⚡';
   document.getElementById('resTitle').textContent = myRank===1?'You Won!':myRank>0?`Rank #${myRank}`:'Game Over!';
-  document.getElementById('resSub').textContent = `XP saved on GenLayer · ${gameState.round} rounds played`;
+  document.getElementById('resSub').textContent = `${myXP} XP earned · ${gameState.round} rounds played`;
 
   const medals = ['🥇','🥈','🥉'];
   document.getElementById('finalLb').innerHTML = sorted.slice(0,5).map((p,i) => `
@@ -837,8 +862,8 @@ async function endGame() {
       <div class="lb-xp">${p.xp} XP</div>
     </div>`).join('');
 
-  gameState.round=0; gameState.myScore=0; gameState.currentQ=null; demoRooms={};
   document.getElementById('playerXP').textContent = myXP + ' XP';
+  gameState.round=0; gameState.myScore=0; gameState.currentQ=null; demoRooms={};
 }
 
 async function loadLeaderboard() {
