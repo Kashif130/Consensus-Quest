@@ -412,24 +412,32 @@ async function writeContract(functionName, args = [], statusElId = 'txStatus') {
     console.log('[TX sent]', functionName, txHash);
     showTx(statusElId, `⛓ TX sent! Waiting for validators & consensus...\nTX: ${txHash.slice(0,14)}...`);
 
-    // Animate dots while waiting
-    let dots = 0;
+    // Show live phase updates while waiting
+    const phases = ['Pending','Proposing','Committing','Revealing','Accepted','Finalized'];
+    let elapsed = 0;
+    const isLLM = ['create_room','next_round','generate_question'].includes(functionName);
     const dotTimer = setInterval(() => {
-      dots = (dots + 1) % 4;
-      showTx(statusElId, `⛓ Validators reaching consensus${'.'.repeat(dots)}\nTX: ${txHash.slice(0,14)}...`);
-    }, 2000);
+      elapsed += 3;
+      const mins = Math.floor(elapsed/60);
+      const secs = elapsed % 60;
+      const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+      const hint = isLLM
+        ? `🤖 AI generating question + validators reaching consensus...`
+        : `⛓ Validators processing transaction...`;
+      showTx(statusElId, `${hint}\n⏱ ${timeStr} elapsed · TX: ${txHash.slice(0,14)}...`);
+    }, 3000);
 
     const receipt = await readClient.waitForTransactionReceipt({
       hash: txHash,
       status: TransactionStatus.FINALIZED,
-      retries: 80,
+      retries: 120,
       interval: 3000
     });
 
     clearInterval(dotTimer);
     console.log('[TX finalized]', functionName, receipt);
-    showTx(statusElId, `✅ Transaction finalized! (${functionName})`);
-    await new Promise(r => setTimeout(r, 800));
+    showTx(statusElId, `✅ Done! (${elapsed}s) · ${functionName}`);
+    await new Promise(r => setTimeout(r, 600));
     return { ok: true, receipt };
   } catch(e) {
     console.error('writeContract error:', functionName, e);
@@ -656,69 +664,55 @@ async function startRound() {
 
   const btn = document.getElementById('startRoundBtn');
   btn.disabled = true;
+  const nextRoundNum = gameState.round + 1;
 
-  // Round 1: question already in room from create_room
-  // Round 2+: host must call next_round to generate a new question on-chain
   if (gameState.round >= 1 && gameState.isHost) {
-    showTx('txGame', `⛓ Generating new question for Round ${gameState.round + 1}... (~30s)`);
+    // HOST: generate new question on-chain for next round
+    showTx('txGame', `⛓ Generating question for Round ${nextRoundNum}... (~30s)`);
     const ok = await writeContract('next_round', [gameState.roomId, gameState.mode], 'txGame');
     if (!ok) {
       showTx('txGame', '❌ Failed to generate next question. Try again.');
       btn.disabled = false;
       return;
     }
-    // Wait for new question to be readable on chain
-    showTx('txGame', '⏳ Waiting for new question to sync on chain...');
-    let room = null;
-    const prevQ = gameState.currentQ?.question || '';
-    for (let i = 0; i < 10; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      room = await readContract('get_room', [gameState.roomId]);
-      if (room && room.question && room.question !== prevQ) break;
-      showTx('txGame', `⏳ Syncing... (${i+1}/10)`);
-    }
-    hideTx('txGame');
-    if (!room || !room.question || room.question === prevQ) {
-      showTx('txGame', '⚠️ New question not ready yet. Please wait and try again.');
-      btn.disabled = false;
-      return;
-    }
-    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
-  } else if (gameState.round >= 1 && !gameState.isHost) {
-    // Guest: poll until host has generated a new question
-    showTx('txGame', '⏳ Waiting for host to generate next question...');
-    const prevQ = gameState.currentQ?.question || '';
-    let room = null;
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      room = await readContract('get_room', [gameState.roomId]);
-      if (room && room.question && room.question !== prevQ) break;
-      showTx('txGame', `⏳ Waiting for new question... (${i+1}/20)`);
-    }
-    hideTx('txGame');
-    if (!room || !room.question || room.question === prevQ) {
-      showTx('txGame', '⚠️ New question not loaded. Please refresh and try again.');
-      btn.disabled = false;
-      return;
-    }
-    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
   }
 
-  // Round 1 — use existing question
-  if (!gameState.currentQ) {
-    showTx('txGame', '⛓ Loading question from chain...');
-    const room = await readContract('get_room', [gameState.roomId]);
-    hideTx('txGame');
-    if (!room || !room.question) { showTx('txGame', '❌ Failed to load question.'); btn.disabled = false; return; }
-    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
+  // BOTH host and guest: always fetch fresh question from chain
+  // For round 2+: wait until chain has a question with round_num matching nextRoundNum
+  showTx('txGame', `⏳ Loading Round ${nextRoundNum} question from chain...`);
+  let room = null;
+  const maxTries = gameState.round >= 1 ? 20 : 8;
+  for (let i = 0; i < maxTries; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    room = await readContract('get_room', [gameState.roomId]);
+    // Check that chain has the correct round question
+    if (room && room.question && Number(room.round_num) === nextRoundNum) break;
+    showTx('txGame', `⏳ Waiting for Round ${nextRoundNum} question${'.'.repeat(i%3+1)} (${i+1}/${maxTries})`);
+    room = null;
   }
 
-  const q = gameState.currentQ;
+  hideTx('txGame');
+
+  if (!room || !room.question) {
+    showTx('txGame', '⚠️ Could not load question. Please try again.');
+    btn.disabled = false;
+    return;
+  }
+
+  // Store question from chain — both players now have same question
+  gameState.currentQ = {
+    question:  room.question,
+    options:   room.options,
+    category:  room.category,
+    round_num: room.round_num
+  };
+
   gameState.round += 1;
   gameState.answered = false;
   document.getElementById('startRoundBtn').disabled = true;
   showScreen('game');
 
+  const q = gameState.currentQ;
   document.getElementById('roundLabel').textContent = `Round ${gameState.round}/${gameState.totalRounds}`;
   document.getElementById('qCat').textContent = q.category || 'INTELLIGENT CONTRACTS';
   document.getElementById('qText').textContent = q.question;
