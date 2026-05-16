@@ -282,7 +282,7 @@ import { testnetAsimov, studionet } from 'https://esm.sh/genlayer-js@latest/chai
 import { TransactionStatus } from 'https://esm.sh/genlayer-js@latest/types';
 
 // ── CONFIG ─────────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x3E3dAd09909E0d6D81aBE652760AA0e3F735F983";
+const CONTRACT_ADDRESS = "0x3999ea8fAd64154426Df3570dbD92b7FE905b699";
 // Change to testnetAsimov if your contract is on testnet
 const CHAIN = studionet;
 
@@ -644,16 +644,67 @@ async function refreshRoom() {
 async function startRound() {
   if (gameState.round >= gameState.totalRounds) { endGame(); return; }
 
+  const btn = document.getElementById('startRoundBtn');
+  btn.disabled = true;
+
+  // Round 1: question already in room from create_room
+  // Round 2+: host must call next_round to generate a new question on-chain
+  if (gameState.round >= 1 && gameState.isHost) {
+    showTx('txGame', `⛓ Generating new question for Round ${gameState.round + 1}... (~30s)`);
+    const ok = await writeContract('next_round', [gameState.roomId, gameState.mode], 'txGame');
+    if (!ok) {
+      showTx('txGame', '❌ Failed to generate next question. Try again.');
+      btn.disabled = false;
+      return;
+    }
+    // Wait for new question to be readable on chain
+    showTx('txGame', '⏳ Waiting for new question to sync on chain...');
+    let room = null;
+    const prevQ = gameState.currentQ?.question || '';
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      room = await readContract('get_room', [gameState.roomId]);
+      if (room && room.question && room.question !== prevQ) break;
+      showTx('txGame', `⏳ Syncing... (${i+1}/10)`);
+    }
+    hideTx('txGame');
+    if (!room || !room.question || room.question === prevQ) {
+      showTx('txGame', '⚠️ New question not ready yet. Please wait and try again.');
+      btn.disabled = false;
+      return;
+    }
+    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
+  } else if (gameState.round >= 1 && !gameState.isHost) {
+    // Guest: poll until host has generated a new question
+    showTx('txGame', '⏳ Waiting for host to generate next question...');
+    const prevQ = gameState.currentQ?.question || '';
+    let room = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      room = await readContract('get_room', [gameState.roomId]);
+      if (room && room.question && room.question !== prevQ) break;
+      showTx('txGame', `⏳ Waiting for new question... (${i+1}/20)`);
+    }
+    hideTx('txGame');
+    if (!room || !room.question || room.question === prevQ) {
+      showTx('txGame', '⚠️ New question not loaded. Please refresh and try again.');
+      btn.disabled = false;
+      return;
+    }
+    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
+  }
+
+  // Round 1 — use existing question
   if (!gameState.currentQ) {
     showTx('txGame', '⛓ Loading question from chain...');
     const room = await readContract('get_room', [gameState.roomId]);
     hideTx('txGame');
-    if (!room || !room.question) { showTx('txGame', '❌ Failed to load question.'); return; }
+    if (!room || !room.question) { showTx('txGame', '❌ Failed to load question.'); btn.disabled = false; return; }
     gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
   }
 
   const q = gameState.currentQ;
-  gameState.round += 1;  // Always increment — don't rely on chain's round_num
+  gameState.round += 1;
   gameState.answered = false;
   document.getElementById('startRoundBtn').disabled = true;
   showScreen('game');
