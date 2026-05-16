@@ -275,32 +275,40 @@ input::placeholder{color:var(--muted);}
   <div class="xp-lbl">XP Saved On-Chain!</div>
 </div>
 
-<script>
+<script type="module">
+// ── GenLayer JS SDK via esm.sh ──────────────────────────────────────────────
+import { createClient } from 'https://esm.sh/genlayer-js@latest';
+import { testnetAsimov, studionet } from 'https://esm.sh/genlayer-js@latest/chains';
+import { TransactionStatus } from 'https://esm.sh/genlayer-js@latest/types';
+
 // ── CONFIG ─────────────────────────────────────────────────────────────────
-const CONFIG = {
-  CONTRACT_ADDRESS: "0xEeDccAf3316D572De22DC746124c71b335ECfcE2",
-  RPC_URL: "https://studio.genlayer.com/api",
-  DEMO_MODE: false
-};
+const CONTRACT_ADDRESS = "0xEeDccAf3316D572De22DC746124c71b335ECfcE2";
+// Change to testnetAsimov if your contract is on testnet
+const CHAIN = studionet;
 
 // ── STATE ──────────────────────────────────────────────────────────────────
-let wallet = { address: null, connected: false };
+let readClient = null;   // for view calls — no wallet needed
+let writeClient = null;  // for write calls — MetaMask signs
+let walletAddress = null;
+let isDemo = false;
+
 let gameState = {
   roomId: null,
   mode: "ic",
-  currentQ: null,    // parsed question object {question, options, category, correct(demo only)}
+  currentQ: null,
   round: 0,
   totalRounds: 7,
   myScore: 0,
   answered: false,
   timer: null,
   timeLeft: 20,
-  isHost: false
+  isHost: false,
+  username: ''
 };
 
 // Demo question bank
 const DEMO_QUESTIONS = [
-  { question:"What makes GenLayer's Intelligent Contracts unique?", options:["They run on Ethereum","They can call LLMs and access the web","They use zero-knowledge proofs","They are written in Solidity"], correct:1, category:"IC", explanation:"Intelligent Contracts can call LLMs via gl.exec_prompt() and fetch real-time web data." },
+  { question:"What makes GenLayer Intelligent Contracts unique?", options:["They run on Ethereum","They can call LLMs and access the web","They use zero-knowledge proofs","They are written in Solidity"], correct:1, category:"IC", explanation:"Intelligent Contracts can call LLMs via gl.exec_prompt() and fetch real-time web data." },
   { question:"What is Optimistic Democracy in GenLayer?", options:["A token governance system","A consensus mechanism that assumes results are correct unless challenged","A proof-of-work algorithm","A staking rewards program"], correct:1, category:"OD", explanation:"Optimistic Democracy assumes validator results are correct by default, allowing appeals." },
   { question:"Which language are GenLayer Intelligent Contracts written in?", options:["Solidity","Rust","Python","TypeScript"], correct:2, category:"IC", explanation:"GenLayer ICs are written in Python and executed on GenVM." },
   { question:"What does gl.exec_prompt() do in a GenLayer contract?", options:["Executes a SQL query","Calls an LLM for AI-powered computation","Deploys a new contract","Transfers tokens"], correct:1, category:"IC", explanation:"gl.exec_prompt() allows Intelligent Contracts to call LLMs during execution." },
@@ -308,272 +316,200 @@ const DEMO_QUESTIONS = [
   { question:"What is GenVM?", options:["A token","The virtual machine executing Intelligent Contracts","A cross-chain bridge","A DEX protocol"], correct:1, category:"IC", explanation:"GenVM is GenLayer's virtual machine designed for AI-powered smart contract execution." },
   { question:"What happens when a validator disagrees in Optimistic Democracy?", options:["Transaction reversed automatically","They can submit an appeal","Their stake is slashed immediately","Contract is paused forever"], correct:1, category:"OD", explanation:"Validators can appeal results they believe are incorrect, triggering broader consensus." }
 ];
+let demoRooms = {};
 
-// ── WALLET ─────────────────────────────────────────────────────────────────
+// ── WALLET / INIT ───────────────────────────────────────────────────────────
 async function connectWallet() {
-  if (typeof window.ethereum !== 'undefined') {
+  if (typeof window.ethereum === 'undefined') {
+    alert('MetaMask not detected. Switching to Demo Mode.');
+    return demoMode();
+  }
+  try {
+    // Request accounts from MetaMask
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    walletAddress = accounts[0];
+
+    // Read client — no wallet needed
+    readClient = createClient({ chain: CHAIN });
+
+    // Write client — MetaMask signs, SDK handles network switching
+    writeClient = createClient({
+      chain: CHAIN,
+      account: walletAddress,
+      provider: window.ethereum
+    });
+
+    // Switch MetaMask to GenLayer network automatically
     try {
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      wallet.address = accounts[0];
-      wallet.connected = true;
-      initLobby();
-    } catch (e) {
-      alert('Wallet connection rejected. Using demo mode.');
-      demoMode();
+      await writeClient.connect(CHAIN === studionet ? 'studionet' : 'testnetAsimov');
+    } catch(e) {
+      console.warn('Network switch warning (may be fine):', e.message);
     }
-  } else {
-    alert('No wallet detected. Using demo mode with simulated wallet.');
+
+    isDemo = false;
+    initLobby();
+  } catch (e) {
+    console.error('Wallet connect error:', e);
+    alert('Wallet rejected or error: ' + e.message + '\nSwitching to Demo Mode.');
     demoMode();
   }
 }
 
 function demoMode() {
-  CONFIG.DEMO_MODE = true;
-  wallet.address = '0x' + Array.from({length:40}, () => Math.floor(Math.random()*16).toString(16)).join('');
-  wallet.connected = true;
+  isDemo = true;
+  walletAddress = '0x' + Array.from({length:40}, () => Math.floor(Math.random()*16).toString(16)).join('');
+  readClient = null;
+  writeClient = null;
   initLobby();
 }
 
 function initLobby() {
   document.getElementById('walletAddr').textContent =
-    wallet.address.slice(0,6) + '...' + wallet.address.slice(-4);
+    walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
   document.getElementById('chainStatus').textContent =
-    CONFIG.DEMO_MODE ? '🟡 Demo Mode' : '🟢 GenLayer';
+    isDemo ? '🟡 Demo Mode' : '🟢 GenLayer';
   document.getElementById('chainStatus').style.color =
-    CONFIG.DEMO_MODE ? 'var(--yellow)' : 'var(--green)';
+    isDemo ? 'var(--yellow)' : 'var(--green)';
   showScreen('lobby');
   loadLeaderboard();
 }
 
-// ── CONTRACT CALLS ─────────────────────────────────────────────────────────
-
-// Parse result from GenLayer — handles string JSON, plain objects, primitives
-function parseResult(raw) {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === 'string') {
-    try { return JSON.parse(raw); } catch { return raw; }
-  }
-  return raw;
-}
-
-// Poll transaction until FINALIZED — GenLayer write txs are async
-async function waitForTx(txHash, maxWaitMs = 90000) {
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    try {
-      const res = await fetch(CONFIG.RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
-          method: 'gen_getTransactionByHash',
-          params: [txHash]
-        })
-      });
-      const data = await res.json();
-      const tx = data.result;
-      if (!tx) { await new Promise(r => setTimeout(r, 2000)); continue; }
-      const s = (tx.status || '').toUpperCase();
-      console.log('[TX poll]', txHash.slice(0,10), s);
-      if (s === 'FINALIZED') return { ok: true };
-      if (s === 'CANCELED' || s === 'FAILED') return { ok: false, error: 'TX ' + s };
-    } catch (e) { console.warn('Poll error:', e); }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  return { ok: false, error: 'TX timed out after 90s' };
-}
-
-async function callContract(method, params, write = false) {
-  if (CONFIG.DEMO_MODE) return simulateContract(method, params);
+// ── CONTRACT READ ───────────────────────────────────────────────────────────
+async function readContract(functionName, args = []) {
+  if (isDemo) return simulateContract(functionName, args);
   try {
-    if (write) {
-      // Send write transaction
-      const sendRes = await fetch(CONFIG.RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
-          method: 'gen_sendTransaction',
-          params: [{ to: CONFIG.CONTRACT_ADDRESS, from: wallet.address, data: { method, params } }]
-        })
-      });
-      const sendData = await sendRes.json();
-      if (sendData.error) {
-        console.error('Send TX error:', sendData.error);
-        return null;
-      }
-      const txHash = sendData.result;
-      console.log('[TX sent]', method, txHash);
-      // Wait for chain confirmation before returning
-      const receipt = await waitForTx(txHash);
-      if (!receipt.ok) { console.error('TX failed:', receipt.error); return null; }
-      return { ok: true };
-
-    } else {
-      // Read (view) call — immediate
-      const res = await fetch(CONFIG.RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
-          method: 'gen_call',
-          params: [{ to: CONFIG.CONTRACT_ADDRESS, from: wallet.address, data: { method, params } }]
-        })
-      });
-      const data = await res.json();
-      if (data.error) { console.error('gen_call error:', data.error); return null; }
-      return parseResult(data.result);
+    const result = await readClient.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName,
+      args
+    });
+    // result may be string JSON — parse it
+    if (typeof result === 'string') {
+      try { return JSON.parse(result); } catch { return result; }
     }
-  } catch (e) {
-    console.error('callContract exception:', e);
+    return result;
+  } catch(e) {
+    console.error('readContract error:', functionName, e);
     return null;
   }
 }
 
-// ── DEMO SIMULATION (mirrors fixed contract exactly) ───────────────────────
-let demoRooms = {}; // room_id -> room object
-let demoRound = 0;
+// ── CONTRACT WRITE ──────────────────────────────────────────────────────────
+async function writeContract(functionName, args = [], statusElId = 'txStatus') {
+  if (isDemo) return simulateContract(functionName, args);
+  try {
+    showTx(statusElId, `⏳ Sending transaction: ${functionName}...`);
 
-function simulateContract(method, params) {
+    // writeContract triggers MetaMask popup automatically
+    const txHash = await writeClient.writeContract({
+      address: CONTRACT_ADDRESS,
+      functionName,
+      args,
+      value: BigInt(0)
+    });
+
+    console.log('[TX sent]', functionName, txHash);
+    showTx(statusElId, `⛓ Waiting for consensus (${functionName})... TX: ${txHash.slice(0,12)}...`);
+
+    // Wait for FINALIZED
+    const receipt = await readClient.waitForTransactionReceipt({
+      hash: txHash,
+      status: TransactionStatus.FINALIZED,
+      retries: 60,
+      interval: 3000
+    });
+
+    console.log('[TX finalized]', functionName, receipt);
+    return { ok: true, receipt };
+  } catch(e) {
+    console.error('writeContract error:', functionName, e);
+    showTx(statusElId, '❌ Error: ' + (e.message || String(e)));
+    return null;
+  }
+}
+
+// ── DEMO SIMULATION ─────────────────────────────────────────────────────────
+function simulateContract(method, args) {
   switch(method) {
+    case 'register': return { ok: true };
 
-    // FIX: was 'register_player' — contract method is 'register'
-    case 'register': {
-      return { ok: true };
-    }
-
-    // FIX: create_room now generates question inside itself (no separate start_round)
     case 'create_room': {
-      const [roomId, mode] = params;
+      const [roomId, mode] = args;
       const q = DEMO_QUESTIONS[Math.floor(Math.random() * DEMO_QUESTIONS.length)];
-      demoRooms[roomId] = {
-        host: wallet.address,
-        guest: '',
-        question: q,
-        round_num: 1,
-        mode,
-        host_answered: false,
-        guest_answered: false,
-        is_active: true
-      };
+      demoRooms[roomId] = { host: walletAddress, guest: '', question: q, round_num: 1, mode, host_answered: false, guest_answered: false, is_active: true };
       return { ok: true };
     }
 
-    // FIX: join_room — was separate, now properly populates guest
     case 'join_room': {
-      const [roomId] = params;
+      const [roomId] = args;
       const room = demoRooms[roomId];
       if (!room) return { error: 'Room not found' };
       if (room.guest) return { error: 'Room full' };
-      room.guest = wallet.address;
+      room.guest = walletAddress;
       return { ok: true };
     }
 
-    // FIX: refreshRoom was calling 'get_scores' — correct method is 'get_room'
     case 'get_room': {
-      const [roomId] = params;
+      const [roomId] = args;
       const room = demoRooms[roomId];
       if (!room) return { error: 'Room not found' };
       const q = room.question;
-      return {
-        room_id: roomId,
-        host: room.host,
-        guest: room.guest,
-        is_full: !!room.guest,
-        is_active: room.is_active,
-        round_num: room.round_num,
-        mode: room.mode,
-        host_answered: room.host_answered,
-        guest_answered: room.guest_answered,
-        question: q.question,
-        options: q.options,
-        category: q.category
-      };
+      return { room_id: roomId, host: room.host, guest: room.guest, is_full: !!room.guest, is_active: room.is_active, round_num: room.round_num, mode: room.mode, host_answered: room.host_answered, guest_answered: room.guest_answered, question: q.question, options: q.options, category: q.category };
     }
 
-    // FIX: was 'submit_answer' with wrong params — now 'submit_room_answer'
     case 'submit_room_answer': {
-      const [roomId, answerIdx] = params;
+      const [roomId, answerIdx] = args;
       const room = demoRooms[roomId];
       if (!room) return { error: 'Room not found' };
-      const q = room.question;
-      const isCorrect = answerIdx === q.correct;
-      const xp = isCorrect ? 100 : 0;
-      if (isCorrect) gameState.myScore += xp;
-      if (room.host === wallet.address) room.host_answered = true;
+      if (room.host === walletAddress) room.host_answered = true;
       else room.guest_answered = true;
       if (room.host_answered && room.guest_answered) room.is_active = false;
       return { ok: true };
     }
 
-    // FIX: check_room_answer (was check_answer without room context)
     case 'check_room_answer': {
-      const [roomId, answerIdx] = params;
+      const [roomId, answerIdx] = args;
       const room = demoRooms[roomId];
       if (!room) return { error: 'Room not found' };
       const q = room.question;
       const correct = q.correct;
       const isCorrect = answerIdx === correct;
-      const voteCounts = [0,0,0,0];
-      voteCounts[answerIdx >= 0 ? answerIdx : correct]++;
-      [0,1,2].forEach(() => {
-        const botAns = Math.random() < 0.65 ? correct : Math.floor(Math.random()*4);
-        voteCounts[botAns]++;
-      });
-      const total = voteCounts.reduce((a,b)=>a+b,0);
-      const consensusPct = Math.round((voteCounts[correct]/total)*100);
-      return {
-        is_correct: isCorrect,
-        correct_index: correct,
-        correct_option: q.options[correct],
-        explanation: q.explanation,
-        xp_earned: isCorrect ? 100 : 0,
-        consensus_percent: consensusPct
-      };
+      const votes = [0,0,0,0];
+      votes[answerIdx >= 0 ? answerIdx : correct]++;
+      [0,1,2].forEach(() => { votes[Math.random()<0.65?correct:Math.floor(Math.random()*4)]++; });
+      const total = votes.reduce((a,b)=>a+b,0);
+      return { is_correct: isCorrect, correct_index: correct, correct_option: q.options[correct], explanation: q.explanation, xp_earned: isCorrect?100:0, consensus_percent: Math.round((votes[correct]/total)*100) };
     }
 
-    case 'get_leaderboard': {
-      return getDemoLeaderboard();
-    }
+    case 'get_leaderboard':
+      return [
+        { username:"0xValidator", address:"0xabc...123", xp:2840, correct:28, games:30 },
+        { username:"GenMaster",   address:"0xdef...456", xp:2210, correct:22, games:25 },
+        { username: gameState.username || walletAddress.slice(0,8), address: walletAddress, xp: gameState.myScore, correct:0, games:gameState.round },
+      ].sort((a,b) => b.xp - a.xp);
 
-    case 'get_player_stats': {
-      return { xp: gameState.myScore, correct: 0, games: 0,
-               username: wallet.address.slice(0,8), address: wallet.address };
-    }
+    case 'get_player_stats':
+      return { xp: gameState.myScore, correct: 0, games: gameState.round, username: gameState.username || walletAddress.slice(0,8), address: walletAddress };
 
     default:
-      console.warn('Unknown contract method in demo:', method);
-      return null;
+      console.warn('Unknown demo method:', method); return null;
   }
-}
-
-function getDemoLeaderboard() {
-  return [
-    { username:"0xValidator", address:"0xabc...123", xp:2840, correct:28, games:30 },
-    { username:"GenMaster",   address:"0xdef...456", xp:2210, correct:22, games:25 },
-    { username:"ICBuilder",   address:"0x123...789", xp:1890, correct:19, games:22 },
-    { username: wallet.address.slice(0,8), address: wallet.address, xp: gameState.myScore, correct:0, games:gameState.round },
-  ].sort((a,b) => b.xp - a.xp);
 }
 
 // ── LOBBY ACTIONS ──────────────────────────────────────────────────────────
 async function registerPlayer() {
   const username = document.getElementById('username').value.trim();
-  if (!username) { alert('Please enter a username first.'); return; }
-  const btn = event.target;
-  btn.disabled = true;
-  showTx('txStatus', '⛓ Registering username on-chain... (waiting for confirmation)');
-  const result = await callContract('register', [username], true);
-  hideTx('txStatus');
-  btn.disabled = false;
-  if (result && result.ok) {
+  if (!username) { alert('Username daalen pehle.'); return; }
+  const btn = document.querySelector('#screen-lobby .card:nth-child(2) .btn');
+  if (btn) btn.disabled = true;
+  showTx('txStatus', '⛓ Username on-chain save ho raha hai...');
+  const result = await writeContract('register', [username], 'txStatus');
+  if (btn) btn.disabled = false;
+  if (result) {
     gameState.username = username;
-    showTx('txStatus', '✅ Username "' + username + '" saved on-chain!');
+    showTx('txStatus', `✅ Username "${username}" chain pe save ho gaya!`);
     setTimeout(() => hideTx('txStatus'), 3000);
-  } else {
-    showTx('txStatus', '❌ Registration failed. Check your wallet and RPC connection.');
   }
-  document.getElementById('playerXP').textContent = gameState.myScore + ' XP';
 }
 
 function selMode(el, mode) {
@@ -583,164 +519,112 @@ function selMode(el, mode) {
 }
 
 async function createRoom() {
-  const roomId = document.getElementById('roomId').value.trim() || 'room-' + Date.now();
-  document.getElementById('roomId').value = roomId;
-  const btn = event.target;
-  btn.disabled = true;
-  showTx('txStatus', '⛓ Creating room on-chain & generating AI question (this takes ~30s)...');
-  const result = await callContract('create_room', [roomId, gameState.mode], true);
+  const rid = document.getElementById('roomId').value.trim() || 'room-' + Date.now();
+  document.getElementById('roomId').value = rid;
+  showTx('txStatus', '⛓ Room ban raha hai aur AI question generate ho raha hai (~30s)...');
+  const result = await writeContract('create_room', [rid, gameState.mode], 'txStatus');
   hideTx('txStatus');
-  btn.disabled = false;
-  if (!result) {
-    showTx('txStatus', '❌ Failed to create room. Check wallet connection and contract address.');
-    return;
-  }
-  gameState.roomId = roomId;
+  if (!result) { showTx('txStatus', '❌ Room create nahi hua. Wallet aur contract check karen.'); return; }
+  gameState.roomId = rid;
   gameState.isHost = true;
-  enterRoom(roomId);
+  enterRoom(rid);
 }
 
 async function joinRoom() {
-  const roomId = document.getElementById('joinRoomId').value.trim();
-  if (!roomId) { alert('Please enter a Room ID.'); return; }
-  const btn = event.target;
-  btn.disabled = true;
-  showTx('txStatus', `⛓ Joining room "${roomId}" on-chain (waiting for confirmation)...`);
-  const result = await callContract('join_room', [roomId], true);
+  const rid = document.getElementById('joinRoomId').value.trim();
+  if (!rid) { alert('Room ID daalen.'); return; }
+  showTx('txStatus', `⛓ Room "${rid}" join ho raha hai...`);
+  const result = await writeContract('join_room', [rid], 'txStatus');
   hideTx('txStatus');
-  btn.disabled = false;
-  if (!result) {
-    showTx('txStatus', '❌ Failed to join room. Make sure the Room ID is correct and room exists on-chain.');
-    return;
-  }
-  if (result.error) {
-    showTx('txStatus', '❌ ' + result.error);
-    return;
-  }
-  gameState.roomId = roomId;
+  if (!result) { showTx('txStatus', '❌ Join nahi hua. Room ID sahi hai? Room chain pe exist karti hai?'); return; }
+  gameState.roomId = rid;
   gameState.isHost = false;
-  enterRoom(roomId);
+  enterRoom(rid);
 }
 
-function enterRoom(roomId) {
-  document.getElementById('roomLabel').textContent = roomId;
+function enterRoom(rid) {
+  document.getElementById('roomLabel').textContent = rid;
   showScreen('room');
   refreshRoom();
 }
 
-// FIX: refreshRoom was calling 'get_scores' which doesn't exist.
-// Now calls 'get_room' which returns both players AND question state.
 async function refreshRoom() {
-  const room = await callContract('get_room', [gameState.roomId]);
+  const room = await readContract('get_room', [gameState.roomId]);
   if (!room || room.error) {
-    document.getElementById('roomPlayers').innerHTML =
-      `<div style="color:var(--muted);font-size:12px">${room?.error || 'Could not load room'}</div>`;
+    document.getElementById('roomPlayers').innerHTML = `<div style="color:var(--muted);font-size:12px">⚠️ ${room?.error || 'Room load nahi hui'}</div>`;
     return;
   }
 
-  // Status badge
   const statusEl = document.getElementById('roomStatusBadge');
   if (room.is_full) {
-    statusEl.innerHTML = `<span class="room-status ready">✅ Both players joined — ready to start!</span>`;
+    statusEl.innerHTML = `<span class="room-status ready">✅ Dono players aa gaye — shuru karo!</span>`;
   } else {
-    statusEl.innerHTML = `<span class="room-status waiting">⏳ Waiting for second player to join with Room ID: <strong>${gameState.roomId}</strong></span>`;
+    statusEl.innerHTML = `<span class="room-status waiting">⏳ Doosre player ka wait — Room ID share karo: <strong>${gameState.roomId}</strong></span>`;
   }
 
-  // Players list
   const players = [];
   if (room.host) players.push({ addr: room.host, role: 'Host', answered: room.host_answered });
-  if (room.guest) players.push({ addr: room.guest, role: 'Guest', answered: room.guest_answered });
-  else players.push({ addr: '—', role: 'Guest', waiting: true });
+  players.push(room.guest ? { addr: room.guest, role: 'Guest', answered: room.guest_answered } : { addr: '—', role: 'Guest', waiting: true });
 
   document.getElementById('roomPlayers').innerHTML = players.map(p => `
     <div class="lb-row">
-      <div class="lb-name">${p.role} ${p.addr.slice(0,10)}${p.waiting ? '' : '...'}</div>
-      <div class="lb-xp">${p.waiting ? '⏳ Waiting' : p.answered ? '✅ Answered' : '🎮 Ready'}</div>
-    </div>
-  `).join('');
+      <div class="lb-name">${p.role}: ${p.waiting ? '⏳ Waiting...' : p.addr.slice(0,14)+'...'}</div>
+      <div class="lb-xp">${p.waiting ? '' : p.answered ? '✅ Jawab diya' : '🎮 Ready'}</div>
+    </div>`).join('');
 
-  // Store question data from room for use in startRound
   if (room.question) {
-    gameState.currentQ = {
-      question: room.question,
-      options: room.options,
-      category: room.category,
-      round_num: room.round_num
-    };
+    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
   }
 
-  // Enable/disable start button
-  const startBtn = document.getElementById('startRoundBtn');
-  startBtn.disabled = !room.is_full;
-  if (!room.is_full) {
-    startBtn.textContent = '⏳ Waiting for player...';
-  } else {
-    startBtn.textContent = `▶ Start Round ${gameState.round + 1}`;
-  }
+  const btn = document.getElementById('startRoundBtn');
+  btn.disabled = !room.is_full;
+  btn.textContent = room.is_full ? `▶ Round ${gameState.round+1} Shuru Karo` : '⏳ Player ka wait...';
 }
 
-// ── GAME FLOW ──────────────────────────────────────────────────────────────
-// FIX: startRound no longer calls 'start_round' (method doesn't exist).
-// Question was already generated in create_room — we just load it from gameState.currentQ
+// ── GAME ────────────────────────────────────────────────────────────────────
 async function startRound() {
-  if (gameState.round >= gameState.totalRounds) {
-    endGame();
-    return;
-  }
+  if (gameState.round >= gameState.totalRounds) { endGame(); return; }
 
-  // If we don't have cached question, fetch from get_room
   if (!gameState.currentQ) {
-    showTx('txGame', '⛓ Loading question from chain...');
-    const room = await callContract('get_room', [gameState.roomId]);
+    showTx('txGame', '⛓ Question chain se load ho rahi hai...');
+    const room = await readContract('get_room', [gameState.roomId]);
     hideTx('txGame');
-    if (!room || room.error || !room.question) {
-      showTx('txGame', '❌ Could not load question. Try refreshing the room.');
-      return;
-    }
-    gameState.currentQ = {
-      question: room.question,
-      options: room.options,
-      category: room.category,
-      round_num: room.round_num
-    };
+    if (!room || !room.question) { showTx('txGame', '❌ Question load nahi hua.'); return; }
+    gameState.currentQ = { question: room.question, options: room.options, category: room.category, round_num: room.round_num };
   }
 
   const q = gameState.currentQ;
-  gameState.round = (q.round_num || gameState.round + 1);
+  gameState.round = q.round_num || gameState.round + 1;
   gameState.answered = false;
-
   document.getElementById('startRoundBtn').disabled = true;
   showScreen('game');
 
   document.getElementById('roundLabel').textContent = `Round ${gameState.round}/${gameState.totalRounds}`;
   document.getElementById('qCat').textContent = q.category || 'INTELLIGENT CONTRACTS';
   document.getElementById('qText').textContent = q.question;
-  document.getElementById('qSub').textContent = '⛓ Question generated by AI on GenLayer · Validators reached consensus';
+  document.getElementById('qSub').textContent = '⛓ AI ne GenLayer pe generate kiya · Validators ne consensus diya';
   document.getElementById('liveXP').textContent = gameState.myScore + ' XP';
   document.getElementById('consensusWrap').style.display = 'none';
 
   const keys = ['A','B','C','D'];
   document.getElementById('optsWrap').innerHTML = q.options.map((opt, i) => `
-    <button class="opt" id="opt${i}" onclick="submitAnswer(${i})">
-      <span class="opt-key">${keys[i]}</span>
-      <span>${opt}</span>
-    </button>
-  `).join('');
+    <button class="opt" id="opt${i}" onclick="window._submitAnswer(${i})">
+      <span class="opt-key">${keys[i]}</span><span>${opt}</span>
+    </button>`).join('');
 
   startTimer(20);
 }
 
-function startTimer(seconds) {
-  gameState.timeLeft = seconds;
+window._submitAnswer = submitAnswer;
+
+function startTimer(s) {
+  gameState.timeLeft = s;
   clearInterval(gameState.timer);
   updateTimer();
   gameState.timer = setInterval(() => {
     gameState.timeLeft--;
     updateTimer();
-    if (gameState.timeLeft <= 0) {
-      clearInterval(gameState.timer);
-      if (!gameState.answered) submitAnswer(null);
-    }
+    if (gameState.timeLeft <= 0) { clearInterval(gameState.timer); if (!gameState.answered) submitAnswer(null); }
   }, 1000);
 }
 
@@ -748,10 +632,7 @@ function updateTimer() {
   const pct = (gameState.timeLeft / 20) * 100;
   document.getElementById('tBar').style.width = pct + '%';
   document.getElementById('tNum').textContent = gameState.timeLeft;
-  document.getElementById('tBar').style.background =
-    gameState.timeLeft <= 5 ? 'var(--red)' :
-    gameState.timeLeft <= 10 ? 'var(--yellow)' :
-    'linear-gradient(90deg,var(--orange),#ff9f6b)';
+  document.getElementById('tBar').style.background = gameState.timeLeft<=5?'var(--red)':gameState.timeLeft<=10?'var(--yellow)':'linear-gradient(90deg,var(--orange),#ff9f6b)';
 }
 
 async function submitAnswer(idx) {
@@ -762,24 +643,18 @@ async function submitAnswer(idx) {
   document.querySelectorAll('.opt').forEach(b => b.disabled = true);
   if (idx !== null) document.getElementById(`opt${idx}`)?.classList.add('selected');
 
-  // FIX: Step 1 — submit the answer on-chain (write tx, no return value needed)
-  showTx('txGame', '⛓ Submitting answer on-chain...');
-  await callContract('submit_room_answer', [gameState.roomId, idx ?? -1], true);
+  // Submit on-chain
+  await writeContract('submit_room_answer', [gameState.roomId, idx ?? -1], 'txGame');
 
-  // FIX: Step 2 — check answer result (read call, returns correct index + explanation)
-  // Was using 'submit_answer' for both — now separate write + read
-  const res = await callContract('check_room_answer', [gameState.roomId, idx ?? -1]);
+  // Read result
+  const res = await readContract('check_room_answer', [gameState.roomId, idx ?? -1]);
   hideTx('txGame');
 
-  if (!res || res.error) {
-    showTx('txGame', '❌ Could not verify answer: ' + (res?.error || 'unknown error'));
-    return;
-  }
+  if (!res || res.error) { showTx('txGame', '❌ Jawab verify nahi hua: ' + (res?.error||'unknown')); return; }
 
-  // FIX: contract returns 'correct_index', frontend was reading 'correct_answer'
   const correctIdx = res.correct_index;
   const isCorrect = res.is_correct;
-  const xpEarned = res.xp_earned || 0;
+  const xp = res.xp_earned || 0;
 
   document.querySelectorAll('.opt').forEach((btn, i) => {
     btn.classList.remove('selected');
@@ -788,16 +663,14 @@ async function submitAnswer(idx) {
   });
 
   if (isCorrect) {
-    gameState.myScore += xpEarned;
+    gameState.myScore += xp;
     document.getElementById('liveXP').textContent = gameState.myScore + ' XP';
-    showXP(xpEarned);
+    showXP(xp);
   }
 
-  // Consensus display (simulated % for on-chain — contract doesn't track votes)
-  const cPct = res.consensus_percent || Math.floor(Math.random() * 30 + 60);
+  const cPct = res.consensus_percent || Math.floor(Math.random()*30+60);
   document.getElementById('cPct').textContent = cPct + '%';
-  document.getElementById('cVal').textContent =
-    `"${(res.correct_option || '').substring(0, 50)}"`;
+  document.getElementById('cVal').textContent = `"${(res.correct_option||'').substring(0,50)}"`;
   document.getElementById('consensusWrap').style.display = 'flex';
 
   setTimeout(() => {
@@ -805,100 +678,83 @@ async function submitAnswer(idx) {
       endGame();
     } else {
       showScreen('room');
-      gameState.currentQ = null; // clear so next round fetches fresh question
+      gameState.currentQ = null;
       document.getElementById('startRoundBtn').disabled = false;
-      document.getElementById('startRoundBtn').textContent =
-        `▶ Start Round ${gameState.round + 1}`;
+      document.getElementById('startRoundBtn').textContent = `▶ Round ${gameState.round+1} Shuru Karo`;
     }
   }, 4000);
 }
 
 async function endGame() {
   showScreen('results');
-
-  // FIX: was calling 'finish_game' + 'get_scores' — neither exist in contract.
-  // Instead fetch player stats from leaderboard (get_player_stats is a view call)
-  const myStats = await callContract('get_player_stats', [wallet.address]);
-
+  const myStats = await readContract('get_player_stats', [walletAddress]);
   const myXP = myStats ? myStats.xp : gameState.myScore;
-  const lbData = await callContract('get_leaderboard', []);
-  const sorted = Array.isArray(lbData) ? lbData : [{ username: 'You', address: wallet.address, xp: myXP }];
+  const lbData = await readContract('get_leaderboard', []);
+  const sorted = Array.isArray(lbData) ? lbData : [{ username:'You', address:walletAddress, xp:myXP }];
+  const myRank = sorted.findIndex(p => p.address?.toLowerCase()===walletAddress?.toLowerCase()) + 1;
 
-  const myRank = sorted.findIndex(p =>
-    p.address?.toLowerCase() === wallet.address?.toLowerCase()
-  ) + 1;
-
-  document.getElementById('resEmoji').textContent = myRank === 1 ? '🏆' : myRank === 2 ? '🥈' : '⚡';
-  document.getElementById('resTitle').textContent = myRank === 1 ? 'You Win!' : myRank > 0 ? `Rank #${myRank}` : 'Game Over!';
-  document.getElementById('resSub').textContent = `XP saved on GenLayer · ${gameState.round} rounds`;
+  document.getElementById('resEmoji').textContent = myRank===1?'🏆':myRank===2?'🥈':'⚡';
+  document.getElementById('resTitle').textContent = myRank===1?'Jeet Gaye!':myRank>0?`Rank #${myRank}`:'Game Over!';
+  document.getElementById('resSub').textContent = `XP GenLayer pe save · ${gameState.round} rounds`;
 
   const medals = ['🥇','🥈','🥉'];
-  document.getElementById('finalLb').innerHTML = sorted.slice(0, 5).map((p,i) => `
+  document.getElementById('finalLb').innerHTML = sorted.slice(0,5).map((p,i) => `
     <div class="lb-row">
-      <div class="lb-rank">${medals[i] || (i+1)}</div>
-      <div>
-        <div class="lb-name">${p.username || p.address?.slice(0,10)}</div>
-        <div class="lb-addr">${(p.address||'').slice(0,14)}...</div>
-      </div>
+      <div class="lb-rank">${medals[i]||(i+1)}</div>
+      <div><div class="lb-name">${p.username||p.address?.slice(0,10)}</div><div class="lb-addr">${(p.address||'').slice(0,14)}...</div></div>
       <div class="lb-xp">${p.xp} XP</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 
-  gameState.round = 0;
-  gameState.myScore = 0;
-  gameState.currentQ = null;
-  demoRooms = {};
+  gameState.round=0; gameState.myScore=0; gameState.currentQ=null; demoRooms={};
   document.getElementById('playerXP').textContent = myXP + ' XP';
 }
 
 async function loadLeaderboard() {
-  // FIX: was passing [10] as param — contract get_leaderboard takes no params
-  const data = await callContract('get_leaderboard', []);
+  const data = await readContract('get_leaderboard', []);
   const list = document.getElementById('leaderboardList');
   if (!data || !Array.isArray(data) || !data.length) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">No entries yet — be the first to play!</div>';
+    list.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Abhi koi entry nahi — pehle aap khelo!</div>';
     return;
   }
   const medals = ['🥇','🥈','🥉'];
   list.innerHTML = data.map((p,i) => `
     <div class="lb-row">
       <div class="lb-rank" style="color:${i===0?'var(--yellow)':i===1?'#94a3b8':i===2?'#cd7c3e':'var(--muted)'}">${medals[i]||i+1}</div>
-      <div>
-        <div class="lb-name">${p.username || p.address?.slice(0,10)}</div>
-        <div class="lb-addr">${(p.address||'').slice(0,14)}...</div>
-      </div>
+      <div><div class="lb-name">${p.username||p.address?.slice(0,10)}</div><div class="lb-addr">${(p.address||'').slice(0,14)}...</div></div>
       <div class="lb-xp">${p.xp} XP</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
-// ── UTILS ──────────────────────────────────────────────────────────────────
+// ── UTILS ────────────────────────────────────────────────────────────────────
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-' + name).classList.add('active');
 }
-
-function showTx(id, msg) {
-  const el = document.getElementById(id);
-  if(el){ el.textContent = msg; el.classList.add('show'); }
-}
-function hideTx(id) {
-  const el = document.getElementById(id);
-  if(el) el.classList.remove('show');
-}
-
+function showTx(id, msg) { const el=document.getElementById(id); if(el){el.textContent=msg;el.classList.add('show');} }
+function hideTx(id) { const el=document.getElementById(id); if(el) el.classList.remove('show'); }
 function showXP(xp) {
-  const el = document.getElementById('xpFlash');
-  document.getElementById('xpNum').textContent = '+' + xp;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 1800);
+  const el=document.getElementById('xpFlash');
+  document.getElementById('xpNum').textContent='+'+xp;
+  el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),1800);
+}
+function shareResult() {
+  const text=`⚡ Maine ${gameState.myScore} XP kamaye Consensus Quest mein — GenLayer ka fully on-chain game!\n\nPlay: https://kashif130.github.io/Consensus-Quest/`;
+  navigator.share?.({title:'Consensus Quest',text})||navigator.clipboard.writeText(text).then(()=>alert('Copied!'));
 }
 
-function shareResult() {
-  const text = `⚡ I scored ${gameState.myScore} XP on Consensus Quest — GenLayer's fully on-chain mini-game!\n\nPlay at: https://kashif130.github.io/Consensus-Quest/`;
-  navigator.share?.({title:'Consensus Quest', text}) ||
-    navigator.clipboard.writeText(text).then(()=>alert('Copied!'));
-}
+// expose to onclick attributes (module scope isolation fix)
+window.connectWallet = connectWallet;
+window.demoMode = demoMode;
+window.registerPlayer = registerPlayer;
+window.selMode = selMode;
+window.createRoom = createRoom;
+window.joinRoom = joinRoom;
+window.refreshRoom = refreshRoom;
+window.startRound = startRound;
+window.endGame = endGame;
+window.loadLeaderboard = loadLeaderboard;
+window.showScreen = showScreen;
+window.shareResult = shareResult;
 </script>
 </body>
 </html>
