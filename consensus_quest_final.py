@@ -1,4 +1,4 @@
-# v0.2.16
+# v0.3.0 - Fixed: Room multiplayer sync, question loading with wallet
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
@@ -10,9 +10,9 @@ class ConsensusQuest(gl.Contract):
     usernames:     TreeMap[Address, str]
     correct_count: TreeMap[Address, u256]
     games_played:  TreeMap[Address, u256]
-    rooms:         TreeMap[str, str]
     last_question: str
     round_number:  u256
+    rooms:         TreeMap[str, str]
 
     def __init__(self) -> None:
         self.last_question = ""
@@ -30,32 +30,34 @@ class ConsensusQuest(gl.Contract):
         return (
             "You are a quiz master for GenLayer blockchain education. "
             f"Generate ONE multiple-choice question about: {topic}. "
-            f"Round number: {round_num}. "
-            "Rules: factual about GenLayer, exactly 4 options (index 0-3), "
-            "one correct answer, intermediate difficulty. "
-            "Respond ONLY with valid JSON, no markdown, no extra text: "
-            "{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
+            f"This is round {round_num} — make a DIFFERENT question than previous rounds. "
+            "Rules: Must be factual about GenLayer, exactly 4 options (index 0 to 3), "
+            "only ONE correct answer, intermediate difficulty. "
+            "Return ONLY a valid JSON object with NO extra text or markdown, "
+            "using these exact keys: "
+            "question (string), options (array of 4 strings), "
+            "correct (integer 0-3), explanation (string), category (string IC or OD). "
+            "Example: {\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
             "\"correct\":1,\"explanation\":\"...\",\"category\":\"IC\"}"
         )
 
-    def _fetch_question(self, prompt: str) -> str:
+    def _fetch_and_validate(self, prompt: str) -> str:
         def make_question():
             raw = gl.nondet.exec_prompt(prompt)
-            raw = raw.replace("```json", "").replace("```", "").strip()
-            start = raw.find("{")
-            end   = raw.rfind("}") + 1
+            cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
+            start = cleaned.find("{")
+            end   = cleaned.rfind("}") + 1
             if start != -1 and end > start:
-                raw = raw[start:end]
-            return raw
+                cleaned = cleaned[start:end]
+            return cleaned
 
-        return gl.eq_principle.prompt_comparative(
+        question_str = gl.eq_principle.prompt_comparative(
             make_question,
-            "Both outputs must be valid JSON quiz questions about GenLayer "
-            "with a question, 4 options, a correct index (0-3), and an explanation. "
-            "The correct answer index must match."
+            "Both outputs must be valid JSON quiz questions about GenLayer with a question, "
+            "4 options, a correct index (0-3), and an explanation. "
+            "The correct answer index must match between both outputs."
         )
 
-    def _validate_and_store(self, question_str: str) -> str:
         parsed = json.loads(question_str)
         assert "question"    in parsed, "Missing question"
         assert "options"     in parsed and len(parsed["options"]) == 4, "Need 4 options"
@@ -78,11 +80,15 @@ class ConsensusQuest(gl.Contract):
     def get_username(self, addr: Address) -> str:
         return self.usernames.get(addr, addr.as_hex[:10])
 
-    # ── CREATE ROOM ─────────────────────────────────────────────────────────
+    # ── ROOM MANAGEMENT ─────────────────────────────────────────────────────
 
     @gl.public.write
     def create_room(self, room_id: str, mode: str) -> None:
         addr = gl.message.sender_address
+
+        # [FIX-1] Room ID cannot be overwritten
+        assert self.rooms.get(room_id, None) is None, "Room ID already exists and cannot be overwritten"
+
         self._init_player(addr)
 
         topic_map = {
@@ -95,44 +101,46 @@ class ConsensusQuest(gl.Contract):
         round_num = int(self.round_number) + 1
         prompt    = self._build_prompt(topic, round_num)
 
-        question_json = self._validate_and_store(self._fetch_question(prompt))
+        question_json = self._fetch_and_validate(prompt)
 
         room = {
-            "host":          addr.as_hex,
-            "guest":         "",
-            "question":      question_json,
-            "round_num":     round_num,
-            "mode":          mode,
-            "host_answered": False,
-            "guest_answered":False,
-            "is_active":     True,
-            "round_done":    False,
+            "host":           addr.as_hex,
+            "guest":          "",
+            "question":       question_json,
+            "round_num":      round_num,
+            "mode":           mode,
+            "host_answered":  False,   # [FIX-2] per-round answer flags
+            "guest_answered": False,   # [FIX-2]
+            "is_active":      True,
+            "round_done":     False,   # [FIX-3] set True when both answered
+            "game_over":      False,   # set True by end_game
         }
-        self.rooms[room_id]  = json.dumps(room)
-        self.last_question   = question_json
-        self.round_number    = u256(round_num)
-
-    # ── JOIN ROOM ────────────────────────────────────────────────────────────
+        self.rooms[room_id] = json.dumps(room)
+        self.last_question  = question_json
+        self.round_number   = u256(round_num)
 
     @gl.public.write
     def join_room(self, room_id: str) -> None:
         addr     = gl.message.sender_address
         room_str = self.rooms.get(room_id, None)
-        assert room_str is not None,             "Room not found"
+        assert room_str is not None,              "Room not found"
 
         room = json.loads(room_str)
-        assert room["is_active"],                "Room is no longer active"
-        assert room["guest"] == "",              "Room is already full"
-        assert room["host"] != addr.as_hex,      "Host cannot join their own room"
+        assert not room.get("game_over", False),  "Game is over"       # [FIX-7]
+        assert room["is_active"],                 "Room is not active"
+        assert room["guest"] == "",               "Room is already full"
+        assert room["host"] != addr.as_hex,       "Host cannot join their own room"
 
         self._init_player(addr)
         room["guest"]       = addr.as_hex
         self.rooms[room_id] = json.dumps(room)
 
-    # ── GET ROOM ─────────────────────────────────────────────────────────────
-
     @gl.public.view
     def get_room(self, room_id: str) -> str:
+        """
+        [FIX-9] Authoritative client sync state.
+        Correct answer hidden while round is active.
+        """
         room_str = self.rooms.get(room_id, None)
         if room_str is None:
             return json.dumps({"error": "Room not found"})
@@ -140,7 +148,7 @@ class ConsensusQuest(gl.Contract):
         room = json.loads(room_str)
         q    = json.loads(room["question"])
 
-        return json.dumps({
+        result = {
             "room_id":        room_id,
             "host":           room["host"],
             "guest":          room["guest"],
@@ -148,15 +156,21 @@ class ConsensusQuest(gl.Contract):
             "is_active":      room["is_active"],
             "round_num":      room["round_num"],
             "mode":           room["mode"],
-            "host_answered":  room["host_answered"],
-            "guest_answered": room["guest_answered"],
+            "host_answered":  room["host_answered"],    # [FIX-9]
+            "guest_answered": room["guest_answered"],   # [FIX-9]
             "round_done":     room.get("round_done", False),
+            "game_over":      room.get("game_over", False),
             "question":       q["question"],
             "options":        q["options"],
             "category":       q.get("category", "GENERAL"),
-        })
+        }
 
-    # ── SUBMIT ANSWER ────────────────────────────────────────────────────────
+        # [FIX-9] Only reveal correct answer after round is done
+        if room.get("round_done", False):
+            result["correct_index"] = q["correct"]
+            result["explanation"]   = q["explanation"]
+
+        return json.dumps(result)
 
     @gl.public.write
     def submit_room_answer(self, room_id: str, answer_index: u256) -> None:
@@ -165,42 +179,61 @@ class ConsensusQuest(gl.Contract):
         assert room_str is not None, "Room not found"
 
         room = json.loads(room_str)
-        assert room["is_active"], "Room is not active"
-        assert room["host"] == addr.as_hex or room["guest"] == addr.as_hex, "Not a player"
+        assert room["is_active"],                                             "Room is not active"
+        assert not room.get("round_done", False),                             "Round already completed"  # [FIX-3]
+        assert room["host"] == addr.as_hex or room["guest"] == addr.as_hex,  "Not a player in this room"
+        assert room["guest"] != "",                                           "Wait for guest to join"   # [FIX-6]
+
+        is_host = room["host"] == addr.as_hex
+
+        # [FIX-2] Block double submission per player per round
+        if is_host:
+            assert not room["host_answered"],  "Host already answered this round"
+        else:
+            assert not room["guest_answered"], "Guest already answered this round"
 
         q          = json.loads(room["question"])
         is_correct = int(answer_index) == int(q["correct"])
 
+        # [FIX-3] XP awarded exactly once per correct answer
         if is_correct:
             self.leaderboard[addr]   = u256(int(self.leaderboard.get(addr, u256(0))) + 100)
             self.correct_count[addr] = u256(int(self.correct_count.get(addr, u256(0))) + 1)
 
         self.games_played[addr] = u256(int(self.games_played.get(addr, u256(0))) + 1)
 
-        if room["host"] == addr.as_hex:
-            room["host_answered"] = True
+        # [FIX-2] Mark answered — immutable for this round
+        if is_host:
+            room["host_answered"]  = True
         else:
             room["guest_answered"] = True
 
+        # Both answered → close round
         if room["host_answered"] and room["guest_answered"]:
+            room["round_done"] = True   # [FIX-3] permanent flag
             room["is_active"]  = False
-            room["round_done"] = True
 
         self.rooms[room_id] = json.dumps(room)
 
-    # ── CHECK ANSWER ─────────────────────────────────────────────────────────
-
     @gl.public.view
     def check_room_answer(self, room_id: str, answer_index: u256) -> str:
+        """
+        [FIX-8] Pure view — never awards XP.
+        Only reveals answer after round_done to prevent cheating.
+        """
         room_str = self.rooms.get(room_id, None)
         if room_str is None:
             return json.dumps({"error": "Room not found"})
 
-        room       = json.loads(room_str)
+        room = json.loads(room_str)
+
+        # [FIX-8] Hide correct answer while round is still active
+        if not room.get("round_done", False):
+            return json.dumps({"error": "Round not finished yet"})
+
         q          = json.loads(room["question"])
         correct    = int(q["correct"])
         is_correct = int(answer_index) == correct
-
         return json.dumps({
             "is_correct":     is_correct,
             "correct_index":  correct,
@@ -209,16 +242,18 @@ class ConsensusQuest(gl.Contract):
             "xp_earned":      100 if is_correct else 0,
         })
 
-    # ── NEXT ROUND ───────────────────────────────────────────────────────────
-
     @gl.public.write
     def next_round(self, room_id: str, mode: str) -> None:
+        """Host starts next round. Only allowed after current round is done."""
         addr     = gl.message.sender_address
         room_str = self.rooms.get(room_id, None)
-        assert room_str is not None,        "Room not found"
+        assert room_str is not None, "Room not found"
 
         room = json.loads(room_str)
-        assert room["host"] == addr.as_hex, "Only host can start next round"
+        assert room["host"] == addr.as_hex,        "Only host can start next round"
+        assert not room.get("game_over", False),    "Game is over"                        # [FIX-7]
+        assert room.get("round_done", False),       "Current round not finished yet"      # [FIX-5]
+        assert room["guest"] != "",                 "Cannot start next round without guest" # [FIX-6]
 
         topic_map = {
             "ic":    "GenLayer Intelligent Contracts, GenVM, Python smart contracts",
@@ -230,15 +265,54 @@ class ConsensusQuest(gl.Contract):
         round_num = int(room["round_num"]) + 1
         prompt    = self._build_prompt(topic, round_num)
 
-        question_json = self._validate_and_store(self._fetch_question(prompt))
+        question_json = self._fetch_and_validate(prompt)
 
         room["question"]       = question_json
         room["round_num"]      = round_num
-        room["host_answered"]  = False
-        room["guest_answered"] = False
+        room["host_answered"]  = False   # [FIX-2] reset per-round flags
+        room["guest_answered"] = False   # [FIX-2]
         room["is_active"]      = True
-        room["round_done"]     = False
+        room["round_done"]     = False   # [FIX-5] must complete before next
         self.rooms[room_id]    = json.dumps(room)
+
+    @gl.public.write
+    def end_game(self, room_id: str) -> None:
+        """Host explicitly closes the room. Blocks further rounds or answers."""
+        addr     = gl.message.sender_address
+        room_str = self.rooms.get(room_id, None)
+        assert room_str is not None,            "Room not found"
+
+        room = json.loads(room_str)
+        assert room["host"] == addr.as_hex,     "Only host can end the game"
+        assert not room.get("game_over", False), "Game already over"
+
+        room["game_over"] = True
+        room["is_active"] = False
+        self.rooms[room_id] = json.dumps(room)
+
+    # ── CLIENT SYNC ──────────────────────────────────────────────────────────
+
+    @gl.public.view
+    def get_sync_state(self, room_id: str) -> str:
+        """
+        [FIX-9] Lightweight poll endpoint for client sync.
+        Clients must align UI to this — not local state.
+        """
+        room_str = self.rooms.get(room_id, None)
+        if room_str is None:
+            return json.dumps({"error": "Room not found"})
+
+        room = json.loads(room_str)
+        return json.dumps({
+            "room_id":        room_id,
+            "round_num":      room["round_num"],
+            "is_active":      room["is_active"],
+            "round_done":     room.get("round_done", False),
+            "game_over":      room.get("game_over", False),
+            "is_full":        room["guest"] != "",
+            "host_answered":  room["host_answered"],
+            "guest_answered": room["guest_answered"],
+        })
 
     # ── SOLO MODE ────────────────────────────────────────────────────────────
 
@@ -253,7 +327,7 @@ class ConsensusQuest(gl.Contract):
         round_num = int(self.round_number) + 1
         prompt    = self._build_prompt(topic, round_num)
 
-        question_json     = self._validate_and_store(self._fetch_question(prompt))
+        question_json      = self._fetch_and_validate(prompt)
         self.last_question = question_json
         self.round_number  = u256(round_num)
 
@@ -271,9 +345,13 @@ class ConsensusQuest(gl.Contract):
 
     @gl.public.write
     def submit_answer(self, answer_index: u256, round_num: u256) -> None:
+        """
+        [FIX-4]  round_num must match — prevents re-submitting old rounds.
+        [FIX-10] round_number advances + last_question cleared after submit.
+        """
         addr = gl.message.sender_address
         assert int(round_num) == int(self.round_number), "Wrong round number"
-        assert self.last_question != "", "No active question"
+        assert self.last_question != "",                 "No active question"
 
         q          = json.loads(self.last_question)
         is_correct = int(answer_index) == int(q["correct"])
@@ -286,10 +364,15 @@ class ConsensusQuest(gl.Contract):
 
         self.games_played[addr] = u256(int(self.games_played[addr]) + 1)
 
+        # [FIX-10] Advance round + clear question — same question cannot be answered again
+        self.round_number  = u256(int(self.round_number) + 1)
+        self.last_question = ""
+
     @gl.public.view
     def check_answer(self, answer_index: u256) -> str:
+        """[FIX-8] Pure view — never awards XP."""
         if not self.last_question:
-            return json.dumps({"error": "No question"})
+            return json.dumps({"error": "No active question"})
         q          = json.loads(self.last_question)
         correct    = int(q["correct"])
         is_correct = int(answer_index) == correct
