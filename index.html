@@ -282,7 +282,7 @@ import { testnetAsimov, studionet } from 'https://esm.sh/genlayer-js@latest/chai
 import { TransactionStatus } from 'https://esm.sh/genlayer-js@latest/types';
 
 // ── CONFIG ─────────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x06A195391B8ac4E56c810d59644234E03dFAB883";
+const CONTRACT_ADDRESS = "0xE0EC5327Fc8c5D7B904429BFC009080C80f3E143";
 // Change to testnetAsimov if your contract is on testnet
 const CHAIN = studionet;
 
@@ -318,6 +318,63 @@ const DEMO_QUESTIONS = [
 ];
 let demoRooms = {};
 
+// ── EIP-1193 NETWORK CONFIG ─────────────────────────────────────────────────
+// Standard EIP-1193 chain params for GenLayer networks.
+// wallet_switchEthereumChain first; if chain unknown MetaMask throws 4902
+// and we fall back to wallet_addEthereumChain to register it — then retry.
+const GENLAYER_CHAINS = {
+  studionet: {
+    chainId:          '0x1a43d',          // 107581 decimal
+    chainName:        'GenLayer Studionet',
+    nativeCurrency:   { name: 'GEN', symbol: 'GEN', decimals: 18 },
+    rpcUrls:          ['https://studio.genlayer.com/api/rpc'],
+    blockExplorerUrls:['https://studio.genlayer.com']
+  },
+  testnetAsimov: {
+    chainId:          '0x1a43e',          // 107582 decimal
+    chainName:        'GenLayer Testnet Asimov',
+    nativeCurrency:   { name: 'GEN', symbol: 'GEN', decimals: 18 },
+    rpcUrls:          ['https://testnet-asimov.genlayer.com/api/rpc'],
+    blockExplorerUrls:['https://testnet-asimov.genlayer.com']
+  }
+};
+
+async function switchToGenLayerNetwork() {
+  const networkKey = CHAIN === studionet ? 'studionet' : 'testnetAsimov';
+  const params     = GENLAYER_CHAINS[networkKey];
+
+  try {
+    // EIP-1193: ask MetaMask to switch to this chainId
+    await window.ethereum.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: params.chainId }]
+    });
+  } catch (switchErr) {
+    if (switchErr.code === 4902) {
+      // Chain not registered in MetaMask yet — add it first, then switch
+      try {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [params]
+        });
+        // After adding, switch again
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: params.chainId }]
+        });
+      } catch (addErr) {
+        // User rejected adding the chain — warn but continue (read-only may still work)
+        console.warn('User rejected adding GenLayer network:', addErr.message);
+      }
+    } else if (switchErr.code === 4001) {
+      // User rejected the switch — warn but continue
+      console.warn('User rejected network switch:', switchErr.message);
+    } else {
+      console.warn('Network switch error (non-fatal):', switchErr.message);
+    }
+  }
+}
+
 // ── WALLET / INIT ───────────────────────────────────────────────────────────
 async function connectWallet() {
   if (typeof window.ethereum === 'undefined') {
@@ -325,26 +382,20 @@ async function connectWallet() {
     return demoMode();
   }
   try {
-    // Request accounts from MetaMask
+    // Step 1: request accounts
     const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
     walletAddress = accounts[0];
 
-    // Read client — no wallet needed
-    readClient = createClient({ chain: CHAIN });
+    // Step 2: EIP-1193 standard network auto-switch (add chain if needed)
+    await switchToGenLayerNetwork();
 
-    // Write client — MetaMask signs, SDK handles network switching
+    // Step 3: set up SDK clients
+    readClient = createClient({ chain: CHAIN });
     writeClient = createClient({
-      chain: CHAIN,
-      account: walletAddress,
+      chain:    CHAIN,
+      account:  walletAddress,
       provider: window.ethereum
     });
-
-    // Switch MetaMask to GenLayer network automatically
-    try {
-      await writeClient.connect(CHAIN === studionet ? 'studionet' : 'testnetAsimov');
-    } catch(e) {
-      console.warn('Network switch warning (may be fine):', e.message);
-    }
 
     isDemo = false;
     initLobby();
